@@ -82,42 +82,110 @@ def test_connection(conn_id, host, port, timeout):
                 'response_length': len(response)
             }
         else:
+            error_msg = f"Invalid HTTP response: {first_line[:50]}"
             with results_lock:
                 results['failed'] += 1
-                results['errors'].append(f"Connection #{conn_id}: Invalid HTTP response: {first_line[:50]}")
+                results['errors'].append(error_msg)
             return {
                 'id': conn_id,
                 'success': False,
-                'error': f"Invalid HTTP response: {first_line[:50]}"
+                'error': error_msg
             }
 
     except socket.timeout:
+        error_msg = 'Timeout'
         with results_lock:
             results['failed'] += 1
-            results['errors'].append(f"Connection #{conn_id}: Timeout")
+            results['errors'].append(error_msg)
         return {
             'id': conn_id,
             'success': False,
-            'error': 'Timeout'
+            'error': error_msg
         }
     except ConnectionRefusedError:
+        error_msg = 'Connection refused'
         with results_lock:
             results['failed'] += 1
-            results['errors'].append(f"Connection #{conn_id}: Connection refused")
+            results['errors'].append(error_msg)
         return {
             'id': conn_id,
             'success': False,
-            'error': 'Connection refused'
+            'error': error_msg
         }
     except Exception as e:
+        error_msg = f"{type(e).__name__}: {e}"
         with results_lock:
             results['failed'] += 1
-            results['errors'].append(f"Connection #{conn_id}: {type(e).__name__}: {e}")
+            results['errors'].append(error_msg)
         return {
             'id': conn_id,
             'success': False,
-            'error': f"{type(e).__name__}: {e}"
+            'error': error_msg
         }
+
+
+def print_test_results(elapsed, extra_stats=None):
+    """Print test results summary and return exit code.
+
+    Args:
+        elapsed: Time elapsed for the test
+        extra_stats: Optional dict with extra stats to print (e.g., {'Per worker': 123.4})
+
+    Returns:
+        Exit code: 0 for success, 1 for failure
+    """
+    from collections import Counter
+
+    total_connections = results['success'] + results['failed']
+
+    print(f"Results:")
+    print(f"=" * 60)
+
+    if total_connections > 0:
+        success_pct = results['success'] * 100 / total_connections
+        failed_pct = results['failed'] * 100 / total_connections
+
+        if extra_stats and 'total_label' in extra_stats:
+            print(f"  Total connections: {total_connections}")
+
+        print(f"  ✓ Successful: {results['success']}/{total_connections} ({success_pct:.1f}%)")
+        print(f"  ✗ Failed:     {results['failed']}/{total_connections} ({failed_pct:.1f}%)")
+        print(f"  Throughput:   {total_connections/elapsed:.1f} connections/second")
+
+        if extra_stats:
+            for key, value in extra_stats.items():
+                if key != 'total_label':
+                    print(f"  {key}: {value}")
+    else:
+        print(f"  No connections completed")
+
+    print()
+
+    # Show error summary if any
+    if results['errors']:
+        error_counts = Counter(results['errors'])
+
+        print(f"Error summary ({len(results['errors'])} total errors):")
+        # Sort by count (descending), then by error message
+        for error_msg, count in sorted(error_counts.items(), key=lambda x: (-x[1], x[0])):
+            print(f"  - {count}: {error_msg}")
+        print()
+
+    # Exit code based on success rate
+    if total_connections > 0:
+        success_rate = results['success'] * 100 / total_connections
+        if success_rate == 100:
+            print("✓ ALL TESTS PASSED!")
+            return 0
+        elif success_rate >= 90:
+            print("⚠ MOSTLY PASSED (≥90%)")
+            return 0
+        else:
+            print("✗ TESTS FAILED")
+            return 1
+    else:
+        print("✗ NO CONNECTIONS COMPLETED")
+        return 1
 
 
 def continuous_worker(worker_id, host, port, timeout, end_time, conn_counter, conn_counter_lock):
@@ -191,47 +259,43 @@ def run_continuous_test(args):
     print(f"\nCompleted continuous test in {total_elapsed:.2f} seconds")
     print()
 
-    # Print final results
+    # Print results with per-worker stats
     total_connections = results['success'] + results['failed']
-    print(f"Results:")
-    print(f"=" * 60)
-    print(f"  Total connections: {total_connections}")
-    if total_connections > 0:
-        print(f"  ✓ Successful: {results['success']}/{total_connections} ({results['success']*100/total_connections:.1f}%)")
-        print(f"  ✗ Failed:     {results['failed']}/{total_connections} ({results['failed']*100/total_connections:.1f}%)")
-        print(f"  Throughput:   {total_connections/total_elapsed:.1f} connections/second")
-        print(f"  Per worker:   {total_connections/args.connections:.1f} connections/worker")
-    else:
-        print(f"  No connections completed")
+    per_worker = f"{total_connections/args.connections:.1f} connections/worker"
+    return print_test_results(total_elapsed, {
+        'total_label': True,
+        'Per worker': per_worker
+    })
+
+
+def run_single_batch_test(args):
+    """Run a single batch of parallel connections."""
+    print(f"Starting {args.connections} parallel connections...")
+    start_time = time.time()
+
+    # Execute parallel connections
+    with ThreadPoolExecutor(max_workers=args.connections) as executor:
+        futures = [executor.submit(test_connection, i, args.host, args.port, args.timeout)
+                   for i in range(args.connections)]
+
+        # Progress indicator
+        if not args.quiet:
+            completed = 0
+            for future in as_completed(futures):
+                completed += 1
+                if completed % 10 == 0 or completed == args.connections:
+                    print(f"  Progress: {completed}/{args.connections}", end='\r')
+
+    elapsed = time.time() - start_time
+    print(f"\nCompleted in {elapsed:.2f} seconds")
     print()
 
-    # Show sample errors if any
-    if results['errors']:
-        print(f"Errors (showing first 10):")
-        for error in results['errors'][:10]:
-            print(f"  - {error}")
-        if len(results['errors']) > 10:
-            print(f"  ... and {len(results['errors']) - 10} more")
-        print()
-
-    # Exit code based on success rate
-    if total_connections > 0:
-        success_rate = results['success'] * 100 / total_connections
-        if success_rate == 100:
-            print("✓ ALL TESTS PASSED!")
-            return 0
-        elif success_rate >= 90:
-            print("⚠ MOSTLY PASSED (≥90%)")
-            return 0
-        else:
-            print("✗ TESTS FAILED")
-            return 1
-    else:
-        print("✗ NO CONNECTIONS COMPLETED")
-        return 1
+    # Print results
+    return print_test_results(elapsed)
 
 
 def main():
+    """Main entry point for the test script."""
     parser = argparse.ArgumentParser(
         description='Test rinetd TCP forwarding with parallel connections',
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -281,57 +345,6 @@ def main():
     else:
         # Single batch mode (original behavior)
         return run_single_batch_test(args)
-
-
-def run_single_batch_test(args):
-    """Run a single batch of parallel connections."""
-    print(f"Starting {args.connections} parallel connections...")
-    start_time = time.time()
-
-    # Execute parallel connections
-    with ThreadPoolExecutor(max_workers=args.connections) as executor:
-        futures = [executor.submit(test_connection, i, args.host, args.port, args.timeout)
-                   for i in range(args.connections)]
-
-        # Progress indicator
-        if not args.quiet:
-            completed = 0
-            for future in as_completed(futures):
-                completed += 1
-                if completed % 10 == 0 or completed == args.connections:
-                    print(f"  Progress: {completed}/{args.connections}", end='\r')
-
-    elapsed = time.time() - start_time
-    print(f"\nCompleted in {elapsed:.2f} seconds")
-    print()
-
-    # Print results
-    print(f"Results:")
-    print(f"=" * 60)
-    print(f"  ✓ Successful: {results['success']}/{args.connections} ({results['success']*100/args.connections:.1f}%)")
-    print(f"  ✗ Failed:     {results['failed']}/{args.connections} ({results['failed']*100/args.connections:.1f}%)")
-    print(f"  Throughput:   {args.connections/elapsed:.1f} connections/second")
-    print()
-
-    # Show sample errors if any
-    if results['errors']:
-        print(f"Errors (showing first 10):")
-        for error in results['errors'][:10]:
-            print(f"  - {error}")
-        if len(results['errors']) > 10:
-            print(f"  ... and {len(results['errors']) - 10} more")
-        print()
-
-    # Exit code
-    if results['success'] == args.connections:
-        print("✓ ALL TESTS PASSED!")
-        return 0
-    elif results['success'] > args.connections * 0.9:
-        print("⚠ MOSTLY PASSED (>90%)")
-        return 0
-    else:
-        print("✗ TESTS FAILED")
-        return 1
 
 
 if __name__ == '__main__':
