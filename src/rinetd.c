@@ -1357,7 +1357,7 @@ RETSIGTYPE quit(int s)
 
 void registerPID(char const *pid_file_name)
 {
-#if defined(__linux__)
+#if !_WIN32
 	FILE *pid_file = fopen(pid_file_name, "w");
 	if (pid_file == NULL) {
 		/* non-fatal, non-Linux may lack /var/run... */
