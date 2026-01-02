@@ -846,8 +846,6 @@ static void tcp_write_cb(uv_write_t *req, int status)
 
 	/* Close if pending and buffer flushed */
 	if (cnx->coClosing && socket->sentPos == other_socket->recvPos) {
-		logEvent(cnx, cnx->server, cnx->coLog);
-
 		/* Determine which handle's closing flag to check/set */
 		int *closing_flag = NULL;
 		if (socket == &cnx->local) {
@@ -1200,6 +1198,13 @@ static void handleUdpRead(ConnectionInfo *cnx, char const *buffer, int bytes)
 
 static void handleClose(ConnectionInfo *cnx, Socket *socket, Socket *other_socket)
 {
+	/* If not already closing, log the event with final byte counts */
+	if (!cnx->coClosing) {
+		cnx->coLog = (socket == &cnx->local) ?
+			logLocalClosedFirst : logRemoteClosedFirst;
+		logEvent(cnx, cnx->server, cnx->coLog);
+	}
+
 	cnx->coClosing = 1;
 
 	/* Close the socket's libuv handle */
@@ -1390,7 +1395,7 @@ static void logEvent(ConnectionInfo const *cnx, ServerInfo const *srv, int resul
 	if (timz < 0) {
 		timz = -timz;
 	}
-	strftime(tstr, sizeof(tstr), "%d/%b/%Y:%H:%M:%S ", t);
+	strftime(tstr, sizeof(tstr), "%Y-%m-%d %H:%M:%S ", t);
 
 	int64_t bytesOut = 0, bytesIn = 0;
 	if (cnx != NULL) {
