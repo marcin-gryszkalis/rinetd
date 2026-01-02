@@ -847,7 +847,20 @@ static void tcp_write_cb(uv_write_t *req, int status)
 	/* Close if pending and buffer flushed */
 	if (cnx->coClosing && socket->sentPos == other_socket->recvPos) {
 		logEvent(cnx, cnx->server, cnx->coLog);
-		uv_close((uv_handle_t*)stream, handle_close_cb);
+
+		/* Determine which handle's closing flag to check/set */
+		int *closing_flag = NULL;
+		if (socket == &cnx->local) {
+			closing_flag = &cnx->local_handle_closing;
+		} else {
+			closing_flag = &cnx->remote_handle_closing;
+		}
+
+		/* Only close if not already closing */
+		if (closing_flag && !(*closing_flag) && !uv_is_closing((uv_handle_t*)stream)) {
+			*closing_flag = 1;  /* Set BEFORE calling uv_close() */
+			uv_close((uv_handle_t*)stream, handle_close_cb);
+		}
 	}
 }
 
